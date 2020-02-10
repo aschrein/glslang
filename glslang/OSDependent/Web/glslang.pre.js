@@ -48,6 +48,38 @@ Module['compileGLSLZeroCopy'] = function(glsl, shader_stage, gen_debug, spirv_ve
     return ret;
 };
 
+Module['parse_attributes'] = function(glsl, shader_stage) {
+
+    var shader_stage_int; // EShLanguage
+    switch (shader_stage) {
+        case 'vertex':   shader_stage_int = 0; break;
+        case 'fragment': shader_stage_int = 4; break;
+        case 'compute':  shader_stage_int = 5; break;
+        default:
+            throw new Error("shader_stage must be 'vertex', 'fragment', or 'compute'.");
+    }
+
+    var p_output = Module['_malloc'](4);
+    var p_output_len = Module['_malloc'](4);
+    var id = ccall('parse_attributes',
+        'number',
+        ['string', 'number', 'number', 'number'],
+        [glsl, shader_stage_int, p_output, p_output_len]);
+    var output = getValue(p_output, 'i32');
+    var output_len = getValue(p_output_len, 'i32');
+    Module['_free'](p_output);
+    Module['_free'](p_output_len);
+
+    if (id === 0) {
+        throw new Error('GLSL compilation failed');
+    }
+
+    var out_str = new TextDecoder("utf-8").decode(Module['HEAPU8'].subarray(output, output + output_len - 1));
+    Module['_destroy_output_string'](id);
+
+    return out_str;
+};
+
 Module['compileGLSL'] = function(glsl, shader_stage, gen_debug, spirv_version) {
     var compiled = Module['compileGLSLZeroCopy'](glsl, shader_stage, gen_debug, spirv_version);
     var ret = compiled['data'].slice()

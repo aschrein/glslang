@@ -33,15 +33,17 @@
 // POSSIBILITY OF SUCH DAMAGE.
 //
 
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
+#include <sstream>
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
 
 #include "../../../SPIRV/GlslangToSpv.h"
+#include "../../../glslang/Include/intermediate.h"
 #include "../../../glslang/Public/ShaderLang.h"
 
 #ifndef __EMSCRIPTEN__
@@ -200,16 +202,16 @@ void* convert_glsl_to_spirv(const char* glsl,
     }
     EShLanguage stage = static_cast<EShLanguage>(stage_int);
     switch (spirv_version) {
-        case glslang::EShTargetSpv_1_0:
-        case glslang::EShTargetSpv_1_1:
-        case glslang::EShTargetSpv_1_2:
-        case glslang::EShTargetSpv_1_3:
-        case glslang::EShTargetSpv_1_4:
-        case glslang::EShTargetSpv_1_5:
-            break;
-        default:
-            fprintf(stderr, "Invalid SPIR-V version number\n");
-            return nullptr;
+    case glslang::EShTargetSpv_1_0:
+    case glslang::EShTargetSpv_1_1:
+    case glslang::EShTargetSpv_1_2:
+    case glslang::EShTargetSpv_1_3:
+    case glslang::EShTargetSpv_1_4:
+    case glslang::EShTargetSpv_1_5:
+        break;
+    default:
+        fprintf(stderr, "Invalid SPIR-V version number\n");
+        return nullptr;
     }
 
     if (!initialized) {
@@ -248,6 +250,115 @@ void* convert_glsl_to_spirv(const char* glsl,
     *spirv_len = output->size();
     *spirv = output->data();
     return output;
+}
+
+EMSCRIPTEN_KEEPALIVE
+char *parse_attributes(const char* glsl, int stage_int, char **out_str, size_t *out_size)
+{
+    using namespace glslang;
+    if (glsl == nullptr) {
+        fprintf(stderr, "Input pointer null\n");
+        return nullptr;
+    }
+
+    if (stage_int != 0 && stage_int != 4 && stage_int != 5) {
+        fprintf(stderr, "Invalid shader stage\n");
+        return nullptr;
+    }
+    if (out_size == nullptr || out_str == nullptr) {
+        fprintf(stderr, "Output pointer null\n");
+        return nullptr;
+    }
+    *out_size = 0;
+    *out_str = nullptr;
+
+    EShLanguage stage = static_cast<EShLanguage>(stage_int);
+
+    if (!initialized) {
+        glslang::InitializeProcess();
+        initialized = true;
+    }
+
+    glslang::TShader shader(stage);
+    shader.setStrings(&glsl, 1);
+    shader.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientOpenGL, 100);
+    shader.setEnvClient(glslang::EShClientOpenGL, glslang::EShTargetOpenGL_450);
+    if (!shader.parse(&DefaultTBuiltInResource, 100, true, EShMsgDefault)) {
+        fprintf(stderr, "Parse failed\n");
+        fprintf(stderr, "%s\n", shader.getInfoLog());
+        return nullptr;
+    }
+
+    glslang::TProgram program;
+    program.addShader(&shader);
+    if (!program.link(EShMsgDefault)) {
+        fprintf(stderr, "Link failed\n");
+        fprintf(stderr, "%s\n", program.getInfoLog());
+        return nullptr;
+    }
+
+    struct MyVisitor : public TIntermTraverser {
+        std::stringstream ss;
+        std::unordered_set<TString> visited_nodes;
+        bool error = false;
+        void visitSymbol(TIntermSymbol* symbol) override
+        {
+            if (symbol->getType().getQualifier().storage == EvqVaryingIn ||
+                symbol->getType().getQualifier().storage == EvqIn) {
+                if (visited_nodes.find(symbol->getName()) != visited_nodes.end())
+                    return;
+                visited_nodes.insert(symbol->getName());
+                if (symbol->getBasicType() != EbtFloat) {
+                    error = true;
+                    fprintf(stderr, "The only expected type of an attribute is float\n");
+                    return;
+                }
+                char const* type_str = nullptr;
+                switch (symbol->getType().getVectorSize()) {
+                case 1:
+                    type_str = "float";
+                    break;
+                case 2:
+                    type_str = "vec2";
+                    break;
+                case 3:
+                    type_str = "vec3";
+                    break;
+                case 4:
+                    type_str = "vec4";
+                    break;
+                default:
+                    error = true;
+                    fprintf(stderr, "The only expected types of components are 1, 2, 3 and 4\n");
+                }
+                ss << "{\"name\":\"" << symbol->getName() << "\",\"type\":\"" << type_str << "\"},";
+            }
+        }
+    };
+    MyVisitor visitor;
+    visitor.ss << "{\"attributes\":[";
+    program.getIntermediate(stage)->getTreeRoot()->traverse(&visitor);
+    if (visitor.error)
+        return nullptr;
+    visitor.ss << "{}]}";
+    auto str = visitor.ss.str();
+    char *out = (char *)malloc(str.size() + 1);
+    if (!out)
+        return nullptr;
+    memcpy(out, str.c_str(), str.size() + 1);
+    out[str.size()] = '\0';
+    *out_str = out;
+    *out_size = str.size() + 1;
+    return out;
+}
+
+/*
+ * Destroys a buffer created by parse_attributes
+ */
+EMSCRIPTEN_KEEPALIVE
+void destroy_output_string(void* p)
+{
+    free(p);
 }
 
 /*

@@ -9,6 +9,7 @@ export default (() => {
                 onRuntimeInitialized() {
                     resolve({
                         compileGLSLZeroCopy: this.compileGLSLZeroCopy,
+                        parse_attributes: this.parse_attributes,
                         compileGLSL: this.compileGLSL,
                     });
                 },
