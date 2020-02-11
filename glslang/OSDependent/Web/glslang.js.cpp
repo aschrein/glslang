@@ -252,6 +252,28 @@ void* convert_glsl_to_spirv(const char* glsl,
     return output;
 }
 
+static char const *get_type_str(glslang::TIntermSymbol* symbol) {
+    using namespace glslang;
+    static const char* TypeString[] = {
+    "bool",  "bvec2", "bvec3", "bvec4",
+    "float",  "vec2",  "vec3",  "vec4",
+    "int",   "ivec2", "ivec3", "ivec4",
+    "uint",  "uvec2", "uvec3", "uvec4",
+    "float",  "mat2", "mat3", "mat4",
+    };
+    int isf = symbol->getBasicType() == EbtFloat ? 1 : 0;
+    int isu = symbol->getBasicType() == EbtUint ? 1 : 0;
+    int isi = symbol->getBasicType() == EbtInt ? 1 : 0;
+    int rows = symbol->getType().getMatrixRows();
+    int comps = symbol->getType().getVectorSize();
+    int isv = symbol->getType().isVector() ? 1 : 0;
+    int iss = symbol->getType().isScalar() ? 1 : 0;
+    int ism = symbol->getType().isMatrix() ? 1 : 0;
+    int rowid = ism ? 4 : isf * 1 + isu * 3 + isi * 2;
+    int colid = isv * (comps - 1) + ism * (rows - 1);
+    return TypeString[colid + rowid * 4];
+}
+
 EMSCRIPTEN_KEEPALIVE
 char *parse_attributes(const char* glsl, int stage_int, char **out_str, size_t *out_size)
 {
@@ -281,6 +303,8 @@ char *parse_attributes(const char* glsl, int stage_int, char **out_str, size_t *
 
     glslang::TShader shader(stage);
     shader.setStrings(&glsl, 1);
+    shader.setAutoMapBindings(true);
+    shader.setAutoMapLocations(true);
     shader.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientOpenGL, 100);
     shader.setEnvClient(glslang::EShClientOpenGL, glslang::EShTargetOpenGL_450);
     if (!shader.parse(&DefaultTBuiltInResource, 100, true, EShMsgDefault)) {
@@ -298,50 +322,38 @@ char *parse_attributes(const char* glsl, int stage_int, char **out_str, size_t *
     }
 
     struct MyVisitor : public TIntermTraverser {
-        std::stringstream ss;
+        bool is_vertex_shader;
+        std::stringstream attributes;
+        std::stringstream uniforms;
         std::unordered_set<TString> visited_nodes;
         bool error = false;
         void visitSymbol(TIntermSymbol* symbol) override
         {
-            if (symbol->getType().getQualifier().storage == EvqVaryingIn ||
-                symbol->getType().getQualifier().storage == EvqIn) {
-                if (visited_nodes.find(symbol->getName()) != visited_nodes.end())
+            if (visited_nodes.find(symbol->getName()) != visited_nodes.end())
                     return;
-                visited_nodes.insert(symbol->getName());
-                if (symbol->getBasicType() != EbtFloat) {
-                    error = true;
-                    fprintf(stderr, "The only expected type of an attribute is float\n");
-                    return;
-                }
-                char const* type_str = nullptr;
-                switch (symbol->getType().getVectorSize()) {
-                case 1:
-                    type_str = "float";
-                    break;
-                case 2:
-                    type_str = "vec2";
-                    break;
-                case 3:
-                    type_str = "vec3";
-                    break;
-                case 4:
-                    type_str = "vec4";
-                    break;
-                default:
-                    error = true;
-                    fprintf(stderr, "The only expected types of components are 1, 2, 3 and 4\n");
-                }
-                ss << "{\"name\":\"" << symbol->getName() << "\",\"type\":\"" << type_str << "\"},";
+            visited_nodes.insert(symbol->getName());
+            if (is_vertex_shader &&
+                  (symbol->getType().getQualifier().storage == EvqVaryingIn ||
+                   symbol->getType().getQualifier().storage == EvqIn)) {
+                attributes << "{\"name\":\"" << symbol->getName() << "\",\"type\":\"" << get_type_str(symbol) << "\"},";
+            } else if (symbol->getType().getQualifier().storage == EvqUniform) {
+                uniforms << "{\"name\":\"" << symbol->getName() << "\",\"type\":\"" << get_type_str(symbol) << "\"},";
             }
+
         }
     };
     MyVisitor visitor;
-    visitor.ss << "{\"attributes\":[";
+    visitor.attributes << "\"attributes\":[";
+    visitor.uniforms << "\"uniforms\":[";
+    visitor.is_vertex_shader = stage_int == 0;
     program.getIntermediate(stage)->getTreeRoot()->traverse(&visitor);
     if (visitor.error)
         return nullptr;
-    visitor.ss << "{}]}";
-    auto str = visitor.ss.str();
+    visitor.attributes << "{}]";
+    visitor.uniforms << "{}]";
+    std::stringstream json;
+    json << "{" << visitor.attributes.str() << "," << visitor.uniforms.str() << "}";
+    auto str = json.str();
     char *out = (char *)malloc(str.size() + 1);
     if (!out)
         return nullptr;
